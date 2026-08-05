@@ -29,6 +29,7 @@ def _run(accounts: list[dict], request: dict, page_size: int) -> dict:
         "companies campaigned": diagnostics["companies"],
         "  of which keyed": diagnostics["keyed"],
         "  of which provisional": diagnostics["provisional"],
+        "  of which need review": diagnostics["needs_review"],
         "deliverables": len(plan["deliverables"]),
         "rows read": diagnostics["rows_read"],
         "rows merged into another": diagnostics["rows_merged"],
@@ -63,6 +64,7 @@ def main() -> None:
         "companies campaigned",
         "  of which keyed",
         "  of which provisional",
+        "  of which need review",
         "deliverables",
         "rows read",
         "rows merged into another",
@@ -83,6 +85,25 @@ def main() -> None:
     for kit, count in sorted(results[25]["_kits"].items()):
         print(f"  {kit:32} {count:>6}")
 
+    plan = results[25]["_plan"]
+    shared = plan["diagnostics"]["ambiguous_domains"]
+    print()
+    print("identity model for this list:")
+    print(f"  domains carrying more than one identity : {len(shared)}")
+    print(f"  companies flagged needs_review          : "
+          f"{plan['diagnostics']['needs_review']}")
+    if shared:
+        for domain, identities in shared.items():
+            print(f"    {domain}")
+            for identity in identities:
+                company = next(
+                    c for c in plan["companies"] if c.identity == identity
+                )
+                print(f"      {identity:52} {company.company_name}")
+    else:
+        print("    none - every domain in this list resolves to one company,")
+        print("    so this list needs no ambiguity band at all")
+
     overrides = results[25]["_overrides"]
     print()
     print(f"rows carrying a stored brand override, ignored: {len(overrides)}")
@@ -92,7 +113,6 @@ def main() -> None:
             shown += f", ... (+{len(overrides) - 6} more)"
         print(f"  {shown}")
 
-    plan = results[25]["_plan"]
     result = evaluate_campaign_coverage(
         plan,
         accounts,
