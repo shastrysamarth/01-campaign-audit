@@ -187,8 +187,6 @@ class ResolvedCompany:
     domain: str | None
     source_row_id: str
     merged_row_ids: tuple[str, ...]
-    saved_brand_kit_id: str | None
-    saved_template_id: str | None
 
     @property
     def provisional(self) -> bool:
@@ -241,8 +239,6 @@ def resolve_companies(
                 domain=primary.get("domain"),
                 source_row_id=str(primary["id"]),
                 merged_row_ids=tuple(str(m["id"]) for m in members[1:]),
-                saved_brand_kit_id=primary.get("saved_brand_kit_id"),
-                saved_template_id=primary.get("saved_template_id"),
             )
         )
     return resolved
@@ -254,10 +250,14 @@ def _make_deliverables(
     brand_kit_id: str,
     template_id: str,
 ) -> list[dict[str, Any]]:
+    """One set of required assets per company, in the requested brand.
+
+    The brand kit and template come from the request and nowhere else. A row
+    carrying `saved_brand_kit_id` or `saved_template_id` does not override the
+    customer's selection; those rows are reported instead.
+    """
     deliverables: list[dict[str, Any]] = []
     for company in companies:
-        effective_brand_kit = company.saved_brand_kit_id or brand_kit_id
-        effective_template = company.saved_template_id or template_id
         for asset_type in REQUIRED_ASSET_TYPES:
             deliverables.append(
                 {
@@ -266,8 +266,8 @@ def _make_deliverables(
                     "company_id": company.company_id,
                     "company_name": company.company_name,
                     "asset_type": asset_type,
-                    "brand_kit_id": effective_brand_kit,
-                    "template_id": effective_template,
+                    "brand_kit_id": brand_kit_id,
+                    "template_id": template_id,
                 }
             )
     return deliverables
@@ -292,7 +292,11 @@ def build_campaign_plan(
 
     if not scan.complete:
         diagnostics.update(
-            companies=0, keyed=0, provisional=0, rows_merged=0
+            companies=0,
+            keyed=0,
+            provisional=0,
+            rows_merged=0,
+            brand_overrides_ignored=[],
         )
         return {
             "complete": False,
@@ -304,11 +308,17 @@ def build_campaign_plan(
         }
 
     companies = resolve_companies(rows)
+    overrides = [
+        str(row["id"])
+        for row in rows
+        if "saved_brand_kit_id" in row or "saved_template_id" in row
+    ]
     diagnostics.update(
         companies=len(companies),
         keyed=sum(1 for c in companies if not c.provisional),
         provisional=sum(1 for c in companies if c.provisional),
         rows_merged=sum(len(c.merged_row_ids) for c in companies),
+        brand_overrides_ignored=overrides,
     )
 
     return {
