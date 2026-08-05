@@ -53,11 +53,15 @@ class TargetAccountTool:
         )
 
 
-def _collapse_page(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _collapse_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse rows that name the same company.
 
-    The uploaded list can name a company more than once, so the page is
+    The uploaded list can name a company more than once, so the list is
     reduced to one row per company before anything downstream sees it.
+
+    This runs once over every row the scan accumulated, never over a single
+    page. Which rows survive is a property of the upload, not of the page size
+    the source happened to serve.
     """
     kept: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -109,10 +113,12 @@ def build_campaign_plan(
     cursor: str | None = None
     while True:
         page = tool.load_page(cursor=cursor, page_size=page_size)
-        rows.extend(_collapse_page(page.rows))
+        rows.extend(page.rows)
         if not page.truncated:
             break
         cursor = page.next_cursor
+
+    rows = _collapse_rows(rows)
 
     return {
         "source_row_ids": [str(row["id"]) for row in rows],
