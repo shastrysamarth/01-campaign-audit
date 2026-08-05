@@ -445,14 +445,26 @@ def evaluate_campaign_coverage(
     brand_kit_id: str,
     template_id: str,
 ) -> CoverageResult:
-    """Check the plan against the list the customer uploaded.
+    """Check the plan against whatever account list it is given.
 
     This resolves `accounts` itself and compares. It does not take the plan's
-    word for how many companies there were, how many rows were read, or whether
-    the scan finished. The plan's own `complete` flag is required to be True,
-    but it is never sufficient: a source that stopped early and reported
-    success still fails here, because the companies it never read are missing
-    from the deliverables.
+    word for how many companies there were, how many rows were read, or which
+    companies need review.
+
+    What this does NOT do is establish completeness. It compares the plan to
+    the list handed to it, and it is only as complete as that list. In this
+    repository `demo.py` and the tests read the uploaded JSON directly, so a
+    short read shows up here as missing companies — but that is a property of
+    how this repository is wired, not a property of the check. Fed from the
+    same paginated source the plan was built from, a source that stopped early
+    would be invisible to this function too, because both sides of the
+    comparison would be short by the same rows.
+
+    `scan_accounts` states the underlying limit: a source that stops early and
+    reports success emits the same page sequence as one that reached the end,
+    so no reader can tell them apart. Requiring `plan["complete"]` here is a
+    consistency check on the scan's own findings, not independent evidence.
+    See DECISIONS.md.
     """
     failures: list[str] = []
 
@@ -558,7 +570,26 @@ def evaluate_campaign_coverage(
             f"recorded as merged ({_sample(unaccounted)})"
         )
 
-    # 6. no fabricated identifier reaches a deliverable
+    # 6. the review flags match what the upload implies
+    expected_review = {c.identity for c in expected if c.needs_review}
+    planned_review = {
+        c.identity for c in plan.get("companies", []) if c.needs_review
+    }
+    if expected_review != planned_review:
+        missed = sorted(expected_review - planned_review)
+        spurious = sorted(planned_review - expected_review)
+        if missed:
+            failures.append(
+                f"{len(missed)} companies share a domain with another identity "
+                f"but are not flagged for review ({_sample(missed)})"
+            )
+        if spurious:
+            failures.append(
+                f"{len(spurious)} companies are flagged for review without "
+                f"sharing a domain ({_sample(spurious)})"
+            )
+
+    # 7. no fabricated identifier reaches a deliverable
     fabricated = sorted(
         {
             repr(i.get("company_id"))
@@ -577,9 +608,11 @@ def evaluate_campaign_coverage(
             f"({_sample(fabricated)})"
         )
 
+    review = sum(1 for c in expected if c.needs_review)
     summary = (
         f"{len(expected)} logical companies in the upload "
-        f"({keyed} keyed, {provisional} provisional); "
+        f"({keyed} keyed, {provisional} provisional, "
+        f"{review} needing review); "
         f"{len(deliverables)} deliverables in the plan"
     )
     if failures:

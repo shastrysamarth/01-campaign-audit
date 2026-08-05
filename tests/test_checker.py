@@ -7,6 +7,7 @@ caught, which is the only evidence that a green run means anything.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import unittest
 from pathlib import Path
@@ -161,6 +162,31 @@ class TheCheckCatchesABrokenPlan(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertIn("neither campaigned nor recorded as merged",
                       failure_text(result))
+
+    def test_unflagged_ambiguous_company_fails(self) -> None:
+        """The plan must flag what the upload implies, not fewer."""
+        plan = good_plan()
+        plan["companies"] = [
+            dataclasses.replace(c, shared_domains=())
+            for c in plan["companies"]
+        ]
+
+        result = check(plan)
+        self.assertFalse(result.passed)
+        self.assertIn("not flagged for review", failure_text(result))
+
+    def test_spuriously_flagged_company_fails(self) -> None:
+        plan = good_plan()
+        clean = next(
+            i for i, c in enumerate(plan["companies"]) if not c.needs_review
+        )
+        plan["companies"][clean] = dataclasses.replace(
+            plan["companies"][clean], shared_domains=("invented.example",)
+        )
+
+        result = check(plan)
+        self.assertFalse(result.passed)
+        self.assertIn("without sharing a domain", failure_text(result))
 
     def test_check_does_not_take_the_plan_at_its_word(self) -> None:
         """A plan built from half the upload, checked against all of it."""

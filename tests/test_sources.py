@@ -98,10 +98,16 @@ class ScanRecoversFromARetriedPage(unittest.TestCase):
         self.assertTrue(check(replayed).passed)
 
 
-class ShortReadIsCaughtByTheCheckNotTheScan(unittest.TestCase):
-    """A source that stops early and reports success cannot be contradicted
-    through the paging interface. It is caught by comparing the plan against
-    the upload, which is the whole reason the check reads `accounts`."""
+class ShortReadIsNotDetectableFromThePagingInterface(unittest.TestCase):
+    """A source that stops early and reports success emits the same page
+    sequence as one that reached the end, so no reader can tell them apart.
+
+    The second test below only passes because it hands the checker an
+    independent full copy of the upload, read from disk rather than through the
+    loader. Fed from the same paginated source the plan was built from, the
+    checker would be short by exactly the same rows and would agree. This is a
+    property of how the test is wired, not a capability of the check. See
+    DECISIONS.md."""
 
     def test_silently_short_loader_looks_fine_to_the_scan(self) -> None:
         plan = plan_from(SilentlyShortLoader(ACCOUNTS))
@@ -109,7 +115,7 @@ class ShortReadIsCaughtByTheCheckNotTheScan(unittest.TestCase):
         self.assertTrue(plan["complete"])
         self.assertLess(plan["diagnostics"]["rows_read"], len(ACCOUNTS))
 
-    def test_but_the_check_rejects_it(self) -> None:
+    def test_an_independent_copy_of_the_upload_rejects_it(self) -> None:
         plan = plan_from(SilentlyShortLoader(ACCOUNTS))
         result = check(plan)
 
