@@ -192,6 +192,42 @@ def company_key(row: dict[str, Any]) -> str | None:
     return value.strip() or None
 
 
+def ambiguous_domains(
+    rows: list[dict[str, Any]],
+) -> dict[str, tuple[str, ...]]:
+    """Domains that carry more than one resolved identity.
+
+    The customer said some entries could not be told apart well enough to say
+    whether they were one company or two. This is that condition, stated so a
+    machine can find it: two rows agree on where the company lives and disagree
+    on who it is.
+
+    Every identity on such a domain is returned, not just the later one. When
+    `company-copperline-group` and `company-copperline-energy` both appear on
+    `copperline-group.example`, nothing in the upload says which of the two is
+    the mistake, so both are flagged and a person decides.
+
+    Membership is computed from every row of a company, not from the row whose
+    values were kept. `company-copperline-energy` resolves to
+    `copperline-energy.example` but has a second row on
+    `copperline-group.example`, and looking only at the surviving row would
+    miss it.
+    """
+    by_domain: dict[str, set[str]] = {}
+    for row in rows:
+        domain = row.get("domain")
+        if not domain:
+            continue
+        key = company_key(row)
+        identity = f"company_id:{key}" if key else f"row:{row['id']}"
+        by_domain.setdefault(str(domain), set()).add(identity)
+    return {
+        domain: tuple(sorted(identities))
+        for domain, identities in sorted(by_domain.items())
+        if len(identities) > 1
+    }
+
+
 @dataclass(frozen=True)
 class ResolvedCompany:
     """One logical company, and every uploaded row that resolved to it."""
@@ -202,6 +238,17 @@ class ResolvedCompany:
     domain: str | None
     source_row_id: str
     merged_row_ids: tuple[str, ...]
+    shared_domains: tuple[str, ...] = ()
+
+    @property
+    def needs_review(self) -> bool:
+        """True when this company shares a domain with a different identity.
+
+        Not a defect and not a reason to withhold the campaign. It is the
+        question the upload cannot answer on its own, surfaced for a person
+        instead of being resolved by a guess.
+        """
+        return bool(self.shared_domains)
 
     @property
     def provisional(self) -> bool:
@@ -231,6 +278,11 @@ def resolve_companies(
     page. Which rows survive is a property of the upload, not of the page size
     the source happened to serve.
     """
+    shared: dict[str, list[str]] = {}
+    for domain, identities in ambiguous_domains(rows).items():
+        for identity in identities:
+            shared.setdefault(identity, []).append(domain)
+
     order: list[str] = []
     groups: dict[str, list[dict[str, Any]]] = {}
 
@@ -254,6 +306,7 @@ def resolve_companies(
                 domain=primary.get("domain"),
                 source_row_id=str(primary["id"]),
                 merged_row_ids=tuple(str(m["id"]) for m in members[1:]),
+                shared_domains=tuple(shared.get(identity, ())),
             )
         )
     return resolved
@@ -322,6 +375,8 @@ def build_campaign_plan(
             companies=0,
             keyed=0,
             provisional=0,
+            needs_review=0,
+            ambiguous_domains={},
             rows_merged=0,
             brand_overrides_ignored=[],
         )
@@ -341,10 +396,13 @@ def build_campaign_plan(
         if "saved_brand_kit_id" in row or "saved_template_id" in row
     ]
 
+    shared_domains = ambiguous_domains(rows)
     diagnostics.update(
         companies=len(companies),
         keyed=sum(1 for c in companies if not c.provisional),
         provisional=sum(1 for c in companies if c.provisional),
+        needs_review=sum(1 for c in companies if c.needs_review),
+        ambiguous_domains=shared_domains,
         rows_merged=sum(len(c.merged_row_ids) for c in companies),
         brand_overrides_ignored=overrides,
     )

@@ -15,6 +15,7 @@ from repair_lab import (
     REQUIRED_ASSET_TYPES,
     FABRICATED_IDS,
     TargetAccountTool,
+    ambiguous_domains,
     build_campaign_plan,
     evaluate_campaign_coverage,
     resolve_companies,
@@ -160,6 +161,72 @@ class AC4BothShippedFixtures(unittest.TestCase):
 
                 result = check(plan, accounts)
                 self.assertTrue(result.passed, result.failures)
+
+
+class AmbiguousIdentityIsFlagged(unittest.TestCase):
+    """The customer's "entries I cannot tell apart" complaint.
+
+    Any domain carrying more than one resolved identity flags every identity on
+    it, because nothing in the upload says which one is the mistake.
+    """
+
+    def test_list_one_flags_four_domains_and_eight_companies(self) -> None:
+        accounts = load(LIST_ONE)
+        shared = ambiguous_domains(accounts)
+
+        self.assertEqual(len(shared), 4)
+        self.assertEqual(
+            sorted(shared),
+            [
+                "copperline-group.example",
+                "northwind-energy.example",
+                "sable-fitness.example",
+                "tessellate-capital.example",
+            ],
+        )
+        flagged = [c for c in resolve_companies(accounts) if c.needs_review]
+        self.assertEqual(len(flagged), 8)
+
+    def test_list_two_needs_no_ambiguity_band(self) -> None:
+        accounts = load(LIST_TWO)
+
+        self.assertEqual(ambiguous_domains(accounts), {})
+        self.assertEqual(
+            [c for c in resolve_companies(accounts) if c.needs_review], []
+        )
+
+    def test_both_sides_of_the_pair_are_flagged(self) -> None:
+        """Not just the later row. Nothing says which one is wrong."""
+        companies = {c.identity: c for c in resolve_companies(load(LIST_ONE))}
+
+        for identity in (
+            "company_id:company-northwind-energy",
+            "company_id:company-northwind-energy-emea",
+        ):
+            self.assertTrue(companies[identity].needs_review, identity)
+
+    def test_flag_uses_every_row_not_just_the_surviving_one(self) -> None:
+        """company-copperline-energy resolves to copperline-energy.example but
+        has a second row on copperline-group.example. Looking only at the row
+        whose values were kept would miss it."""
+        companies = {c.identity: c for c in resolve_companies(load(LIST_ONE))}
+        energy = companies["company_id:company-copperline-energy"]
+
+        self.assertEqual(energy.domain, "copperline-energy.example")
+        self.assertTrue(energy.needs_review)
+        self.assertIn("copperline-group.example", energy.shared_domains)
+
+    def test_review_flag_does_not_withhold_the_campaign(self) -> None:
+        accounts = load(LIST_ONE)
+        plan = plan_for(accounts)
+        flagged = [c for c in plan["companies"] if c.needs_review]
+
+        served = {
+            d["company_identity"]
+            for d in plan["deliverables"]
+        }
+        for company in flagged:
+            self.assertIn(company.identity, served)
 
 
 class AC5PageSizeInvariance(unittest.TestCase):
