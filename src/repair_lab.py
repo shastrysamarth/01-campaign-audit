@@ -161,47 +161,110 @@ def _drop_replayed_rows(
     return unique, len(rows) - len(unique)
 
 
-def _collapse_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse rows that name the same company.
+def company_key(row: dict[str, Any]) -> str | None:
+    """The row's external company key, or None when it has none.
 
-    The uploaded list can name a company more than once, so the list is
-    reduced to one row per company before anything downstream sees it.
+    A key is usable only when it is a non-empty string. An absent field, a
+    null, an empty or whitespace-only string, and a non-string value are all
+    the same condition: the upload does not key this row. They share one branch
+    on purpose, so that no upload's particular spelling of "missing" gets code
+    of its own. `target_accounts.json` writes it as null and `second_list.json`
+    writes it as "", and neither is named anywhere in this module.
+    """
+    value = row.get("company_id")
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
+@dataclass(frozen=True)
+class ResolvedCompany:
+    """One logical company, and every uploaded row that resolved to it."""
+
+    identity: str
+    company_id: str | None
+    company_name: str
+    domain: str | None
+    source_row_id: str
+    merged_row_ids: tuple[str, ...]
+    saved_brand_kit_id: str | None
+    saved_template_id: str | None
+
+    @property
+    def provisional(self) -> bool:
+        """True when this company has no external key.
+
+        A provisional company can be campaigned: it is distinguishable from
+        every other row in this upload. It cannot be recognised in the next
+        upload, because there is no key to recognise it by.
+        """
+        return self.company_id is None
+
+
+def resolve_companies(
+    rows: list[dict[str, Any]],
+) -> list[ResolvedCompany]:
+    """Group uploaded rows into logical companies.
+
+    `company_id` is the only field permitted to merge two rows. Domain and
+    company name are carried through but never merge anything: the upload
+    contains one domain shared by two real companies and one company_id spread
+    across two domains, so neither field decides identity.
+
+    A row without a key stands as its own company. It is never merged, with
+    anything, including another keyless row.
 
     This runs once over every row the scan accumulated, never over a single
     page. Which rows survive is a property of the upload, not of the page size
     the source happened to serve.
     """
-    kept: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    order: list[str] = []
+    groups: dict[str, list[dict[str, Any]]] = {}
+
     for row in rows:
-        company_id = str(row["company_id"])
-        if company_id in seen:
-            continue
-        seen.add(company_id)
-        kept.append(row)
-    return kept
+        key = company_key(row)
+        identity = f"company_id:{key}" if key else f"row:{row['id']}"
+        if identity not in groups:
+            groups[identity] = []
+            order.append(identity)
+        groups[identity].append(row)
+
+    resolved: list[ResolvedCompany] = []
+    for identity in order:
+        members = groups[identity]
+        primary = members[0]
+        resolved.append(
+            ResolvedCompany(
+                identity=identity,
+                company_id=company_key(primary),
+                company_name=str(primary.get("company_name", "")),
+                domain=primary.get("domain"),
+                source_row_id=str(primary["id"]),
+                merged_row_ids=tuple(str(m["id"]) for m in members[1:]),
+                saved_brand_kit_id=primary.get("saved_brand_kit_id"),
+                saved_template_id=primary.get("saved_template_id"),
+            )
+        )
+    return resolved
 
 
 def _make_deliverables(
-    accounts: list[dict[str, Any]],
+    companies: list[ResolvedCompany],
     *,
     brand_kit_id: str,
     template_id: str,
-) -> list[dict[str, str]]:
-    deliverables: list[dict[str, str]] = []
-    for account in accounts:
-        effective_brand_kit = str(
-            account.get("saved_brand_kit_id", brand_kit_id)
-        )
-        effective_template = str(
-            account.get("saved_template_id", template_id)
-        )
+) -> list[dict[str, Any]]:
+    deliverables: list[dict[str, Any]] = []
+    for company in companies:
+        effective_brand_kit = company.saved_brand_kit_id or brand_kit_id
+        effective_template = company.saved_template_id or template_id
         for asset_type in REQUIRED_ASSET_TYPES:
             deliverables.append(
                 {
-                    "source_row_id": str(account["id"]),
-                    "company_id": str(account["company_id"]),
-                    "company_name": str(account["company_name"]),
+                    "source_row_id": company.source_row_id,
+                    "company_identity": company.identity,
+                    "company_id": company.company_id,
+                    "company_name": company.company_name,
                     "asset_type": asset_type,
                     "brand_kit_id": effective_brand_kit,
                     "template_id": effective_template,
@@ -228,22 +291,33 @@ def build_campaign_plan(
     }
 
     if not scan.complete:
+        diagnostics.update(
+            companies=0, keyed=0, provisional=0, rows_merged=0
+        )
         return {
             "complete": False,
             "incomplete_reason": scan.reason,
+            "companies": [],
             "source_row_ids": [str(row["id"]) for row in rows],
             "deliverables": [],
             "diagnostics": diagnostics,
         }
 
-    rows = _collapse_rows(rows)
+    companies = resolve_companies(rows)
+    diagnostics.update(
+        companies=len(companies),
+        keyed=sum(1 for c in companies if not c.provisional),
+        provisional=sum(1 for c in companies if c.provisional),
+        rows_merged=sum(len(c.merged_row_ids) for c in companies),
+    )
 
     return {
         "complete": True,
         "incomplete_reason": None,
+        "companies": companies,
         "source_row_ids": [str(row["id"]) for row in rows],
         "deliverables": _make_deliverables(
-            rows,
+            companies,
             brand_kit_id=brand_kit_id,
             template_id=template_id,
         ),
