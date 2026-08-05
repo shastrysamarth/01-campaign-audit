@@ -20,6 +20,10 @@ MAX_CURSOR_SERVINGS = 2
 # Backstop for a source that keeps advancing but never terminates.
 MAX_PAGES = 1000
 
+# Shapes a stringified empty key takes. Used only to assert that none of them
+# ever reaches a deliverable; nothing keys on them.
+FABRICATED_IDS = frozenset({"none", "null", "nan", "nil", "undefined"})
+
 
 @dataclass(frozen=True)
 class ToolPage:
@@ -335,23 +339,169 @@ def build_campaign_plan(
     }
 
 
+# --------------------------------------------------------------------------
+# Checking the campaign against the upload
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CoverageResult:
+    passed: bool
+    summary: str
+    failures: tuple[str, ...]
+
+
+def _sample(items: list[str], limit: int = 3) -> str:
+    shown = ", ".join(sorted(items)[:limit])
+    if len(items) > limit:
+        shown += f", ... (+{len(items) - limit} more)"
+    return shown
+
+
 def evaluate_campaign_coverage(
     plan: dict[str, Any],
     accounts: list[dict[str, Any]],
-) -> tuple[bool, str]:
-    """The currently deployed check. The customer disputes its result."""
-    observed_rows = {str(value) for value in plan.get("source_row_ids", [])}
+    *,
+    brand_kit_id: str,
+    template_id: str,
+) -> CoverageResult:
+    """Check the plan against the list the customer uploaded.
+
+    This resolves `accounts` itself and compares. It does not take the plan's
+    word for how many companies there were, how many rows were read, or whether
+    the scan finished. The plan's own `complete` flag is required to be True,
+    but it is never sufficient: a source that stopped early and reported
+    success still fails here, because the companies it never read are missing
+    from the deliverables.
+    """
+    failures: list[str] = []
+
+    row_ids = [str(row["id"]) for row in accounts]
+    if len(row_ids) != len(set(row_ids)):
+        repeated = [r for r, n in collections.Counter(row_ids).items() if n > 1]
+        failures.append(
+            f"uploaded rows do not have unique ids ({_sample(repeated)}); "
+            f"identity cannot be established"
+        )
+    upload_row_ids = set(row_ids)
+
+    expected = resolve_companies(accounts)
+    expected_identities = {company.identity for company in expected}
+    keyed = sum(1 for c in expected if not c.provisional)
+    provisional = len(expected) - keyed
+
     deliverables = plan.get("deliverables", [])
 
-    for row_id in sorted(observed_rows):
-        observed_types = {
-            str(item.get("asset_type"))
-            for item in deliverables
-            if str(item.get("source_row_id")) == row_id
-        }
-        if observed_types != set(REQUIRED_ASSET_TYPES):
-            return False, f"source row {row_id} has the wrong asset set"
-
+    # 1. the scan has to have finished
     if plan.get("complete") is not True:
-        return False, "campaign did not declare completion"
-    return True, f"all {len(observed_rows)} campaigned rows have the requested asset types"
+        failures.append(
+            f"scan did not complete: {plan.get('incomplete_reason')}"
+        )
+
+    # 2. every logical company, exactly once
+    by_identity: dict[str, list[str]] = collections.defaultdict(list)
+    for item in deliverables:
+        by_identity[str(item.get("company_identity"))].append(
+            str(item.get("asset_type"))
+        )
+
+    missing = sorted(expected_identities - set(by_identity))
+    unexpected = sorted(set(by_identity) - expected_identities)
+    if missing:
+        failures.append(
+            f"{len(missing)} logical companies have no deliverables "
+            f"({_sample(missing)})"
+        )
+    if unexpected:
+        failures.append(
+            f"{len(unexpected)} deliverable identities are not in the upload "
+            f"({_sample(unexpected)})"
+        )
+
+    # 3. exactly the required assets, once each. Comparing sorted lists rather
+    #    than sets so a duplicated asset fails too.
+    wrong_assets = [
+        identity
+        for identity in sorted(expected_identities & set(by_identity))
+        if sorted(by_identity[identity]) != sorted(REQUIRED_ASSET_TYPES)
+    ]
+    if wrong_assets:
+        failures.append(
+            f"{len(wrong_assets)} companies have the wrong asset set "
+            f"({_sample(wrong_assets)})"
+        )
+
+    # 4. the request's brand kit and template, with no exceptions
+    wrong_brand = {
+        str(i.get("company_identity"))
+        for i in deliverables
+        if i.get("brand_kit_id") != brand_kit_id
+    }
+    wrong_template = {
+        str(i.get("company_identity"))
+        for i in deliverables
+        if i.get("template_id") != template_id
+    }
+    if wrong_brand:
+        failures.append(
+            f"{len(wrong_brand)} companies carry a brand kit other than "
+            f"{brand_kit_id!r} ({_sample(sorted(wrong_brand))})"
+        )
+    if wrong_template:
+        failures.append(
+            f"{len(wrong_template)} companies carry a template other than "
+            f"{template_id!r} ({_sample(sorted(wrong_template))})"
+        )
+
+    # 5. traceability, in both directions
+    untraceable = sorted(
+        {
+            str(i.get("source_row_id"))
+            for i in deliverables
+            if str(i.get("source_row_id")) not in upload_row_ids
+        }
+    )
+    if untraceable:
+        failures.append(
+            f"{len(untraceable)} deliverables cite a row that is not in the "
+            f"upload ({_sample(untraceable)})"
+        )
+
+    accounted: set[str] = set()
+    for company in plan.get("companies", []):
+        accounted.add(company.source_row_id)
+        accounted.update(company.merged_row_ids)
+    unaccounted = sorted(upload_row_ids - accounted)
+    if unaccounted:
+        failures.append(
+            f"{len(unaccounted)} uploaded rows are neither campaigned nor "
+            f"recorded as merged ({_sample(unaccounted)})"
+        )
+
+    # 6. no fabricated identifier reaches a deliverable
+    fabricated = sorted(
+        {
+            repr(i.get("company_id"))
+            for i in deliverables
+            if i.get("company_id") is not None
+            and (
+                not isinstance(i.get("company_id"), str)
+                or not str(i.get("company_id")).strip()
+                or str(i.get("company_id")).strip().lower() in FABRICATED_IDS
+            )
+        }
+    )
+    if fabricated:
+        failures.append(
+            f"{len(fabricated)} deliverables carry a fabricated company id "
+            f"({_sample(fabricated)})"
+        )
+
+    summary = (
+        f"{len(expected)} logical companies in the upload "
+        f"({keyed} keyed, {provisional} provisional); "
+        f"{len(deliverables)} deliverables in the plan"
+    )
+    if failures:
+        return CoverageResult(False, summary, tuple(failures))
+    return CoverageResult(True, summary, ())

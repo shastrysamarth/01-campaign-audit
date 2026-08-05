@@ -72,10 +72,17 @@ def main() -> None:
         brand_kit_id=request["brand_kit"]["id"],
         template_id=request["template"]["id"],
     )
-    passed, detail = evaluate_campaign_coverage(plan, accounts)
+    result = evaluate_campaign_coverage(
+        plan,
+        accounts,
+        brand_kit_id=request["brand_kit"]["id"],
+        template_id=request["template"]["id"],
+    )
     print()
-    print(f"shipped check returned        : {passed}")
-    print(f"shipped check said            : {detail}")
+    print(f"coverage check returned       : {result.passed}")
+    print(f"coverage check said           : {result.summary}")
+    for failure in result.failures:
+        print(f"  FAIL: {failure}")
 
 
 if __name__ == "__main__":
