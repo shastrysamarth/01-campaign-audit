@@ -66,6 +66,11 @@ class TargetAccountTool:
         )
 
 
+# --------------------------------------------------------------------------
+# Reading the list
+# --------------------------------------------------------------------------
+
+
 @dataclass(frozen=True)
 class ScanResult:
     """What a full pass over the account service produced.
@@ -93,8 +98,9 @@ def scan_accounts(
 
     One thing cannot be established here. A source that stops early and reports
     itself finished, with no cursor to probe past, is indistinguishable through
-    this interface from one that genuinely reached the end. Catching that needs
-    a check that reads the uploaded list, which arrives in W1.
+    this interface from one that genuinely reached the end. That case is caught
+    by `evaluate_campaign_coverage`, which compares the plan against the
+    uploaded list instead of against the source's own account of itself.
     """
     rows: list[dict[str, Any]] = []
     servings: collections.Counter[str] = collections.Counter()
@@ -163,6 +169,11 @@ def _drop_replayed_rows(
         seen.add(row_id)
         unique.append(row)
     return unique, len(rows) - len(unique)
+
+
+# --------------------------------------------------------------------------
+# Deciding which rows name the same company
+# --------------------------------------------------------------------------
 
 
 def company_key(row: dict[str, Any]) -> str | None:
@@ -248,6 +259,11 @@ def resolve_companies(
     return resolved
 
 
+# --------------------------------------------------------------------------
+# Building the campaign
+# --------------------------------------------------------------------------
+
+
 def _make_deliverables(
     companies: list[ResolvedCompany],
     *,
@@ -284,6 +300,13 @@ def build_campaign_plan(
     template_id: str,
     page_size: int = 25,
 ) -> dict[str, Any]:
+    """Read the uploaded list and plan the campaign for it.
+
+    Returns a plan whose `complete` is derived from the scan. When the list
+    could not be read, no deliverables are produced at all: publishing part of
+    a campaign under a success flag is the failure this whole exercise is
+    about.
+    """
     scan = scan_accounts(tool, page_size=page_size)
     rows, replayed = _drop_replayed_rows(scan.rows)
 
@@ -306,8 +329,8 @@ def build_campaign_plan(
             "complete": False,
             "incomplete_reason": scan.reason,
             "companies": [],
-            "source_row_ids": [str(row["id"]) for row in rows],
             "deliverables": [],
+            "source_row_ids": [str(row["id"]) for row in rows],
             "diagnostics": diagnostics,
         }
 
@@ -317,6 +340,7 @@ def build_campaign_plan(
         for row in rows
         if "saved_brand_kit_id" in row or "saved_template_id" in row
     ]
+
     diagnostics.update(
         companies=len(companies),
         keyed=sum(1 for c in companies if not c.provisional),
@@ -329,12 +353,10 @@ def build_campaign_plan(
         "complete": True,
         "incomplete_reason": None,
         "companies": companies,
-        "source_row_ids": [str(row["id"]) for row in rows],
         "deliverables": _make_deliverables(
-            companies,
-            brand_kit_id=brand_kit_id,
-            template_id=template_id,
+            companies, brand_kit_id=brand_kit_id, template_id=template_id
         ),
+        "source_row_ids": [str(row["id"]) for row in rows],
         "diagnostics": diagnostics,
     }
 
